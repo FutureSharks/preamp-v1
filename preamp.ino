@@ -1,12 +1,11 @@
-// Time based acceleration of volume changes via IR/encoder?
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// To do:
 // Add NeoPixel code
-// Tidy variable names
-// Tidy all the dB variables, too many of them
-// Mote from remote?
 //
-//////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // If enabled volume/input data will be printed via serial
-bool debugEnabled = true;
+bool debugEnabled = false;
 
 // EEPROM related stuff to save volume level
 #include "EEPROM.h"
@@ -15,9 +14,6 @@ bool isVolumeSavedToEeprom = true;
 unsigned long timeOfLastVolumeChange;
 unsigned long timeBetweenVolumeSaves = 60000;
 byte maximumLevelToSave = 30;
-
-// Volume fading stuff
-bool volumeFadeInProgress = true;
 
 #include "SPI.h"
 // Arduino pin 9 & 10 = inputSelectorCSPin & MDACCSPin
@@ -37,17 +33,21 @@ String lastIRoperation;
 int selectedInput = 0;
 const int inputSelectorCSPin = 9;
 long muteDelay = 1000;
+bool muteEnabled = true;
 
 // MDAC attenuator stuff
 const int MDACCSPin = 10;
 float currentDbLevel;
 float max_dbLevel = -0.0001;
 float min_dbLevel = -96.5;
-float encoderIncrement = 2;
-float iRIncrement = 3;
+float encoderIncrement = 1;
+float iRIncrement = 2;
 float currentChangeVolumeIncrement;
+
+// Volume fading stuff
+bool volumeFadeInProgress = true;
 float targetVolumelevel;
-float newVolumeSetting;
+float fadeInProgressLevel = min_dbLevel;
 
 // Encoder stuff
 const int encoder0GroundPin = 4;
@@ -100,18 +100,16 @@ void setup() {
   digitalWrite(IRPowerPin, HIGH); // Power for the IR
   digitalWrite(IRGroundPin, LOW); // GND for the IR
   // Set initial MADC volume level from EEPROM and prepare to fade to this level
-  currentDbLevel = read_DbLevel();
-  targetVolumelevel = currentDbLevel;
-  newVolumeSetting = min_dbLevel;
+  targetVolumelevel = read_DbLevel();
+  volumeFadeInProgress = true;
   if (debugEnabled) {
     Serial.print ("Setting volume to MDAC level to minimum. Will fade to: ");
-    Serial.println (currentDbLevel);
+    Serial.println (targetVolumelevel);
   }
   SetDac88812Volume(min_dbLevel);
-  volumeFadeInProgress = true;
   // Delay before unmuting output
   delay(muteDelay);
-  setMCP23S08(9, B00000001);
+  changeMute();
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Function to save the DB level to EERPOM
@@ -154,22 +152,38 @@ int changeInput(String direction) {
     case 1:
       setMCP23S08(9, B01001011);
       delay(5);
-      setMCP23S08(9, B00000001);
       break;
     case 2:
       setMCP23S08(9, B00110011);
       delay(5);
-      setMCP23S08(9, B00000001);
       break;
     case 3:
       setMCP23S08(9, B00101101);
       delay(5);
-      setMCP23S08(9, B00000001);
       break;
   }
+  setMCP23S08(9, B00000001);
+  muteEnabled = false;
   if (debugEnabled) {
     Serial.print ("Selected Input: ");
     Serial.println (selectedInput);
+  }
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Function to change mute on input selector
+int changeMute() {
+  if (muteEnabled) {
+    setMCP23S08(9, B00000001);
+    muteEnabled = false;
+    if (debugEnabled) {
+      Serial.println ("Mute disabled");
+    }
+  } else {
+    setMCP23S08(9, B0000000);
+    muteEnabled = true;
+    if (debugEnabled) {
+      Serial.println ("Mute enabled");
+    }
   }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -194,6 +208,7 @@ int SetDac88812Volume(float newDbLevel) {
   unsigned int newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
   unsigned int currentDacR2Rvalue = 65536*(pow(10, (currentDbLevel/20)));
   if (currentDacR2Rvalue == newDacR2Rvalue && currentChangeVolumeIncrement) {
+    // This skips volume level steps that are too small or identical.
     while (currentDacR2Rvalue == newDacR2Rvalue && newDbLevel > (min_dbLevel - currentChangeVolumeIncrement)) {
       newDbLevel = newDbLevel + currentChangeVolumeIncrement;
       newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
@@ -249,6 +264,13 @@ void loop() {
       lastIRoperation = "volumeDown";
       changeVolume(-iRIncrement);
     }
+    if (results.value == 2011265678) {
+      lastIRoperation = "playPause";
+      changeMute();
+    }
+    if (results.value == 2011250830) {
+      lastIRoperation = "menu";
+    }
     if (results.value == 4294967295) {
       if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); }
       if (lastIRoperation == "changeInputDown") { delay(500); changeInput("down"); }
@@ -274,11 +296,11 @@ void loop() {
   }
   // Fade to a set volume level
   if (volumeFadeInProgress) {
-    newVolumeSetting++;
-    SetDac88812Volume(newVolumeSetting);
-    newVolumeSetting = currentDbLevel;
+    fadeInProgressLevel++;
+    SetDac88812Volume(fadeInProgressLevel);
+    fadeInProgressLevel = currentDbLevel;
     delay(50);
-    if (newVolumeSetting >= targetVolumelevel) {
+    if (fadeInProgressLevel >= targetVolumelevel) {
       volumeFadeInProgress = false;
       if (debugEnabled) {
         Serial.println ("Volume fade complete");
