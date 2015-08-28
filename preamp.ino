@@ -5,6 +5,7 @@
 // First remote button doesn't do anything when volume is fading, it just stops the fade
 // Pulse red at higher volumes
 // Don't use negative dB as a counter, just use 0-96.5. Double negatives etc are too confusing.
+// Possible to automatically enable debug when USB is connected?
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -34,6 +35,8 @@ const int IRPowerPin = A1;
 IRrecv irrecv(RECV_PIN);
 decode_results results;
 String lastIRoperation;
+float iRIncrement = 2;
+unsigned long timeOfLastIRChange;
 
 // NeoPixel stuff
 #include "Adafruit_NeoPixel.h"
@@ -54,8 +57,6 @@ const int MDACCSPin = 10;
 float currentDbLevel;
 float max_dbLevel = -0.0001;
 float min_dbLevel = -96.5;
-float encoderIncrement = 1;
-float iRIncrement = 2;
 float currentChangeVolumeIncrement;
 unsigned int currentDacR2Rvalue;
 
@@ -72,6 +73,7 @@ int encoder0PinB = 7;
 int encoder0Pos = 0;
 int encoder0PinALast = HIGH;
 int n = LOW;
+float encoderIncrement = 0.5;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Setup
@@ -198,11 +200,11 @@ int changeInput(String direction) {
   setMCP23S08(9, B00000001);
   muteEnabled = false;
   setNeoPixelColour(255, 0, 0);
-  delay(20);
+  delay(40);
   setNeoPixelColour(0, 255, 0);
-  delay(20);
+  delay(40);
   setNeoPixelColour(0, 0, 255);
-  delay(20);
+  delay(40);
   setNeoPixelColourFromDac(currentDacR2Rvalue);
   if (debugEnabled) {
     Serial.print ("Selected Input: ");
@@ -297,36 +299,42 @@ void loop() {
       lastIRoperation = "changeInputUp";
       if (muteEnabled) { changeMute(); }
       changeInput("up");
+      timeOfLastIRChange = millis();
       delay(100);
     }
     if (results.value == 2011238542) {
       lastIRoperation = "changeInputDown";
       if (muteEnabled) { changeMute(); }
       changeInput("down");
+      timeOfLastIRChange = millis();
       delay(100);
     }
     if (results.value == 2011287694) {
       lastIRoperation = "volumeUp";
       if (muteEnabled) { changeMute(); }
       changeVolume(iRIncrement);
+      timeOfLastIRChange = millis();
     }
     if (results.value == 2011279502) {
       lastIRoperation = "volumeDown";
       if (muteEnabled) { changeMute(); }
       changeVolume(-iRIncrement);
+      timeOfLastIRChange = millis();
     }
     if (results.value == 2011265678) {
       lastIRoperation = "playPause";
       changeMute();
+      timeOfLastIRChange = millis();
     }
     if (results.value == 2011250830) {
       //lastIRoperation = "menu";
     }
-    if (results.value == 4294967295) {
-      if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); }
-      if (lastIRoperation == "changeInputDown") { delay(500); changeInput("down"); }
-      if (lastIRoperation == "volumeUp") { changeVolume(iRIncrement); }
-      if (lastIRoperation == "volumeDown") { changeVolume(-iRIncrement); }
+    if (results.value == 4294967295 && lastIRoperation != "None") {
+      if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); timeOfLastIRChange = millis(); }
+      if (lastIRoperation == "changeInputDown") { delay(500); changeInput("down"); timeOfLastIRChange = millis(); }
+      if (lastIRoperation == "volumeUp") { changeVolume(iRIncrement); timeOfLastIRChange = millis(); }
+      if (lastIRoperation == "volumeDown") { changeVolume(-iRIncrement); timeOfLastIRChange = millis(); }
+      timeOfLastIRChange = millis();
     }
     irrecv.resume(); // Receive the next value
   }
@@ -342,8 +350,9 @@ void loop() {
     }
   }
   encoder0PinALast = n;
-  // Save volume level
+  // Set the time. This is used by other functions
   unsigned long currentTime = millis();
+  // Save volume level
   if (!isVolumeSavedToEeprom && (currentTime - timeOfLastVolumeChange) > timeBetweenVolumeSaves) {
     if (currentDbLevel >= maximumLevelToSave && currentSavedDbLevel != maximumLevelToSave) {
       save_DbLevel(maximumLevelToSave);
@@ -377,5 +386,9 @@ void loop() {
       neopixelIsRed = false;
       timeOfLastNeopixelColourChange = millis();
     }
+  }
+  // Stop IR repeating after timeout to stop interference from other remotes
+  if ((currentTime - timeOfLastIRChange) > 1000 && lastIRoperation != "None") {
+    lastIRoperation = "None";
   }
 }
