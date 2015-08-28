@@ -1,31 +1,28 @@
-// Tidy IR repeat code
 // Time based acceleration of volume changes via IR/encoder?
-// Remember volume level after power off
-// Volume is changed on bootup due to encoder code
-// Verify dB curve, try proper dB curve
-// Skip repeated dacAttenuationLevel steps
-//
+// Add NeoPixel code
+// Tidy variable names
+// Tidy all the dB variables, too many of them
+// Mote from remote?
 //
 //////////////////////////////////////////////////////////////////////////////////////////////
+// If enabled volume/input data will be printed via serial
+bool debugEnabled = true;
+
+// EEPROM related stuff to save volume level
+#include "EEPROM.h"
+int dBLevelEEPROMAddressBit = 0;
+bool isVolumeSavedToEeprom = true;
+unsigned long timeOfLastVolumeChange;
+unsigned long timeBetweenVolumeSaves = 60000;
+byte maximumLevelToSave = 30;
+
+// Volume fading stuff
+bool volumeFadeInProgress = true;
+
 #include "SPI.h"
 // Arduino pin 9 & 10 = inputSelectorCSPin & MDACCSPin
 // Arduino pin 11 = SDI
 // Arduino pin 13 = CLK
-
-// If enabled volume/input data will be printed via serial
-String debugEnabled = "True";
-
-// Neopixel Stuff
-#include "Adafruit_NeoPixel.h"
-#define neopixelPin 8
-// Parameter 1 = number of pixels in strip
-// Parameter 2 = pin number (most are valid)
-// Parameter 3 = pixel type flags, add together as needed:
-//   NEO_KHZ800  800 KHz bitstream (most NeoPixel products w/WS2812 LEDs)
-//   NEO_KHZ400  400 KHz (classic 'v1' (not v2) FLORA pixels, WS2811 drivers)
-//   NEO_GRB     Pixels are wired for GRB bitstream (most NeoPixel products)
-//   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(8, neopixelPin, NEO_GRB + NEO_KHZ800);
 
 // IR stuff
 #include "IRremote.h"
@@ -39,14 +36,18 @@ String lastIRoperation;
 // Input selector stuff
 int selectedInput = 0;
 const int inputSelectorCSPin = 9;
+long muteDelay = 1000;
 
 // MDAC attenuator stuff
 const int MDACCSPin = 10;
-double currentDbLevel = -30;
-double max_dbLevel = -0.01;
-double min_dbLevel = -97;
-double encoderIncrement = 1;
-double iRIncrement = 3;
+float currentDbLevel;
+float max_dbLevel = -0.0001;
+float min_dbLevel = -96.5;
+float encoderIncrement = 2;
+float iRIncrement = 3;
+float currentChangeVolumeIncrement;
+float targetVolumelevel;
+float newVolumeSetting;
 
 // Encoder stuff
 const int encoder0GroundPin = 4;
@@ -54,7 +55,7 @@ const int encoder0PowerPin = 5;
 int encoder0PinA = 6;
 int encoder0PinB = 7;
 int encoder0Pos = 0;
-int encoder0PinALast = LOW;
+int encoder0PinALast = HIGH;
 int n = LOW;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -62,12 +63,9 @@ int n = LOW;
 //////////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
   // Serial
-  if (debugEnabled == "True") {
+  if (debugEnabled) {
     Serial.begin (9600);
   }
-  // Neopixel
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
   // SPI
   // set the CS pins as output:
   pinMode (inputSelectorCSPin, OUTPUT);
@@ -75,12 +73,14 @@ void setup() {
   pinMode (MDACCSPin, OUTPUT);
   digitalWrite(MDACCSPin,HIGH);
   // Start SPI
-  if (debugEnabled == "True") {
+  if (debugEnabled) {
     Serial.println ("Starting SPI..");
   }
   SPI.begin();
   // Set SPI selector IO direction to output for all pinds
-  Serial.println ("Setting SPI selector IO direction control registers..");
+  if (debugEnabled) {
+    Serial.println ("Setting SPI selector IO direction control registers..");
+  }
   digitalWrite(inputSelectorCSPin,LOW);
   SPI.transfer(B01000000); // Send Device Opcode
   SPI.transfer(0); // Select IODIR register
@@ -99,14 +99,39 @@ void setup() {
   pinMode(IRGroundPin, OUTPUT);
   digitalWrite(IRPowerPin, HIGH); // Power for the IR
   digitalWrite(IRGroundPin, LOW); // GND for the IR
-  // Set MADC volume to 0
-  if (debugEnabled == "True") {
-    Serial.println ("Setting volume to initial value..");
+  // Set initial MADC volume level from EEPROM and prepare to fade to this level
+  currentDbLevel = read_DbLevel();
+  targetVolumelevel = currentDbLevel;
+  newVolumeSetting = min_dbLevel;
+  if (debugEnabled) {
+    Serial.print ("Setting volume to MDAC level to minimum. Will fade to: ");
+    Serial.println (currentDbLevel);
   }
-  SetDac88812Volume(currentDbLevel);
-  // Sleep for start-up mute
-  delay(1000);
+  SetDac88812Volume(min_dbLevel);
+  volumeFadeInProgress = true;
+  // Delay before unmuting output
+  delay(muteDelay);
   setMCP23S08(9, B00000001);
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Function to save the DB level to EERPOM
+int save_DbLevel (float DbLevel) {
+  byte byteToWrite = (int) DbLevel * -1;
+  if (byteToWrite < maximumLevelToSave) {
+    byteToWrite = maximumLevelToSave;
+  }
+  if (debugEnabled) {
+    Serial.print ("Writing byte to EEPROM: ");
+    Serial.println (byteToWrite);
+  }
+  isVolumeSavedToEeprom = true;
+  EEPROM.write(dBLevelEEPROMAddressBit, byteToWrite);
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Function to read the DB level to EERPOM
+int read_DbLevel (){
+  byte byteFromEeprom = EEPROM.read(dBLevelEEPROMAddressBit);
+  return (float) (-1 * byteFromEeprom);
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Function to send data to the MCP23S08
@@ -142,31 +167,44 @@ int changeInput(String direction) {
       setMCP23S08(9, B00000001);
       break;
   }
-  if (debugEnabled == "True") {
+  if (debugEnabled) {
     Serial.print ("Selected Input: ");
     Serial.println (selectedInput);
   }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Functions to change volume
-int ChangeVolume(double increment) {
-  double newDbLevel = currentDbLevel + increment;
+int changeVolume(float increment) {
+  float newDbLevel = currentDbLevel + increment;
+  currentChangeVolumeIncrement = increment;
+  volumeFadeInProgress = false;
   if (newDbLevel < max_dbLevel && newDbLevel > min_dbLevel) {
-    currentDbLevel = newDbLevel;
-    SetDac88812Volume(currentDbLevel);
+    SetDac88812Volume(newDbLevel);
   } else if (newDbLevel >= max_dbLevel && currentDbLevel != max_dbLevel) {
     SetDac88812Volume(max_dbLevel);
-    currentDbLevel = max_dbLevel;
   } else if (newDbLevel <= min_dbLevel && currentDbLevel != min_dbLevel) {
     SetDac88812Volume(min_dbLevel);
-    currentDbLevel = min_dbLevel;
-  } 
+  } else {
+    if (debugEnabled) {
+      Serial.println ("No volume change");
+    }
+  }
 }
-int SetDac88812Volume(double currentDbLevel) {
-  unsigned int dacAttenuationLevel = 65536*(pow(10, (currentDbLevel/20)));
-  if (dacAttenuationLevel <= 65536 || dacAttenuationLevel >= 0) {
-    byte highByte = dacAttenuationLevel >> 8;
-    unsigned int lowBytetemp = dacAttenuationLevel << 8;
+int SetDac88812Volume(float newDbLevel) {
+  unsigned int newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
+  unsigned int currentDacR2Rvalue = 65536*(pow(10, (currentDbLevel/20)));
+  if (currentDacR2Rvalue == newDacR2Rvalue && currentChangeVolumeIncrement) {
+    while (currentDacR2Rvalue == newDacR2Rvalue && newDbLevel > (min_dbLevel - currentChangeVolumeIncrement)) {
+      newDbLevel = newDbLevel + currentChangeVolumeIncrement;
+      newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
+    }
+  }
+  if (newDacR2Rvalue <= 65536 && newDacR2Rvalue >= 0) {
+    currentDbLevel = newDbLevel;
+    isVolumeSavedToEeprom = false;
+    timeOfLastVolumeChange = millis();
+    byte highByte = newDacR2Rvalue >> 8;
+    unsigned int lowBytetemp = newDacR2Rvalue << 8;
     byte lowByte = lowBytetemp >> 8;
     digitalWrite(MDACCSPin, LOW);
     SPI.transfer(3); // This is the address code for setting both DACs, ie left and right
@@ -174,33 +212,17 @@ int SetDac88812Volume(double currentDbLevel) {
     SPI.transfer(lowByte);
     digitalWrite(MDACCSPin, HIGH);\
     // Print levels
-    if (debugEnabled == "True") {
+    if (debugEnabled) {
       Serial.print ("dB: ");
-      Serial.print (currentDbLevel);
+      Serial.print (newDbLevel);
       Serial.print (" / DAC Attenuation Level: ");
-      Serial.println (dacAttenuationLevel);
-      int BlueNeopixelBrightness = (currentDbLevel * -2.6);
-      int RedNeopixelBrightness = (255 - (currentDbLevel * -2.6));
-      SetPixelColour(RedNeopixelBrightness, 0, BlueNeopixelBrightness);
+      Serial.println (newDacR2Rvalue);
     }
   } else {
-    if (debugEnabled == "True") {
-      Serial.println ("SetDac88812Volume ERROR");
+    if (debugEnabled) {
+      Serial.println ("SetDac88812Volume level ERROR");
     }
   }
-}
-//////////////////////////////////////////////////////////////////////////////////////////////
-// Functions to change Neopixel colour
-int SetPixelColour(int red, int green, int blue) {
-  strip.setPixelColor(0, red, green, blue);
-  strip.setPixelColor(1, red, green, blue);
-  strip.setPixelColor(2, red, green, blue);
-  strip.setPixelColor(3, red, green, blue);
-  strip.setPixelColor(4, red, green, blue);
-  strip.setPixelColor(5, red, green, blue);
-  strip.setPixelColor(6, red, green, blue);
-  strip.setPixelColor(7, red, green, blue);
-  strip.show();
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -209,40 +231,58 @@ int SetPixelColour(int red, int green, int blue) {
 void loop() {
   // Decode the IR if recieved
   if (irrecv.decode(&results)) {
-    if(results.value == 2011291790) {
+    if (results.value == 2011291790) {
       lastIRoperation = "changeInputUp";
       changeInput("up");
       delay(100);
     }
-    if(results.value == 2011238542) {
+    if (results.value == 2011238542) {
       lastIRoperation = "changeInputDown";
       changeInput("down");
       delay(100);
     }
-    if(results.value == 2011287694) {
+    if (results.value == 2011287694) {
       lastIRoperation = "volumeUp";
-      ChangeVolume(iRIncrement);
+      changeVolume(iRIncrement);
     }
-    if(results.value == 2011279502) {
+    if (results.value == 2011279502) {
       lastIRoperation = "volumeDown";
-      ChangeVolume(-iRIncrement);
+      changeVolume(-iRIncrement);
     }
-    if(results.value == 4294967295) {
+    if (results.value == 4294967295) {
       if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); }
       if (lastIRoperation == "changeInputDown") { delay(500); changeInput("down"); }
-      if (lastIRoperation == "volumeUp") { ChangeVolume(iRIncrement); }
-      if (lastIRoperation == "volumeDown") { ChangeVolume(-iRIncrement); }
+      if (lastIRoperation == "volumeUp") { changeVolume(iRIncrement); }
+      if (lastIRoperation == "volumeDown") { changeVolume(-iRIncrement); }
     }
     irrecv.resume(); // Receive the next value
   }
   // Read encoder
   n = digitalRead(encoder0PinA);
   if ((encoder0PinALast == LOW) && (n == HIGH)) {
-    if (digitalRead(encoder0PinB) == LOW) {
-      ChangeVolume(encoderIncrement);
-    } else {
-      ChangeVolume(-encoderIncrement);
-    }
+      if (digitalRead(encoder0PinB) == LOW) {
+        changeVolume(encoderIncrement);
+      } else {
+        changeVolume(-encoderIncrement);
+      }
   }
   encoder0PinALast = n;
+  // Save volume level
+  unsigned long CurrentTime = millis();
+  if (!isVolumeSavedToEeprom && (CurrentTime - timeOfLastVolumeChange) > timeBetweenVolumeSaves) {
+    save_DbLevel(currentDbLevel);
+  }
+  // Fade to a set volume level
+  if (volumeFadeInProgress) {
+    newVolumeSetting++;
+    SetDac88812Volume(newVolumeSetting);
+    newVolumeSetting = currentDbLevel;
+    delay(50);
+    if (newVolumeSetting >= targetVolumelevel) {
+      volumeFadeInProgress = false;
+      if (debugEnabled) {
+        Serial.println ("Volume fade complete");
+      }
+    }
+  }
 }
