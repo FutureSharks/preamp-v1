@@ -1,6 +1,10 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // To do:
-// Add NeoPixel code
+// Add NeoPixel code, fix crossover point (should be very red at -30 or 1847)
+// Change mute to slowly pulse green
+// First remote button doesn't do anything when volume is fading, it just stops the fade
+// Pulse red at higher volumes
+// Don't use negative dB as a counter, just use 0-96.5. Double negatives etc are too confusing.
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -13,8 +17,10 @@ int dBLevelEEPROMAddressBit = 0;
 bool isVolumeSavedToEeprom = true;
 unsigned long timeOfLastVolumeChange;
 unsigned long timeBetweenVolumeSaves = 60000;
-byte maximumLevelToSave = 30;
+float maximumLevelToSave = -30.0;
+float currentSavedDbLevel;
 
+// SPI library
 #include "SPI.h"
 // Arduino pin 9 & 10 = inputSelectorCSPin & MDACCSPin
 // Arduino pin 11 = SDI
@@ -28,6 +34,14 @@ const int IRPowerPin = A1;
 IRrecv irrecv(RECV_PIN);
 decode_results results;
 String lastIRoperation;
+
+// NeoPixel stuff
+#include "Adafruit_NeoPixel.h"
+const int NeoPixelPin = 3;
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(60, NeoPixelPin, NEO_GRB + NEO_KHZ800);
+bool neopixelIsRed;
+bool neopixelIsBlue;
+unsigned long timeOfLastNeopixelColourChange;
 
 // Input selector stuff
 int selectedInput = 0;
@@ -43,11 +57,12 @@ float min_dbLevel = -96.5;
 float encoderIncrement = 1;
 float iRIncrement = 2;
 float currentChangeVolumeIncrement;
+unsigned int currentDacR2Rvalue;
 
 // Volume fading stuff
 bool volumeFadeInProgress = true;
 float targetVolumelevel;
-float fadeInProgressLevel = min_dbLevel;
+float fadeInProgressLevel = -96.0;
 
 // Encoder stuff
 const int encoder0GroundPin = 4;
@@ -99,11 +114,12 @@ void setup() {
   pinMode(IRGroundPin, OUTPUT);
   digitalWrite(IRPowerPin, HIGH); // Power for the IR
   digitalWrite(IRGroundPin, LOW); // GND for the IR
+  // NeoPixel
+  strip.begin();
   // Set initial MADC volume level from EEPROM and prepare to fade to this level
   targetVolumelevel = read_DbLevel();
-  volumeFadeInProgress = true;
   if (debugEnabled) {
-    Serial.print ("Setting volume to MDAC level to minimum. Will fade to: ");
+    Serial.print ("Setting volume to minimum. Will fade to: ");
     Serial.println (targetVolumelevel);
   }
   SetDac88812Volume(min_dbLevel);
@@ -115,21 +131,38 @@ void setup() {
 // Function to save the DB level to EERPOM
 int save_DbLevel (float DbLevel) {
   byte byteToWrite = (int) DbLevel * -1;
-  if (byteToWrite < maximumLevelToSave) {
-    byteToWrite = maximumLevelToSave;
-  }
   if (debugEnabled) {
     Serial.print ("Writing byte to EEPROM: ");
     Serial.println (byteToWrite);
   }
   isVolumeSavedToEeprom = true;
+  currentSavedDbLevel = DbLevel;
   EEPROM.write(dBLevelEEPROMAddressBit, byteToWrite);
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Function to read the DB level to EERPOM
 int read_DbLevel (){
   byte byteFromEeprom = EEPROM.read(dBLevelEEPROMAddressBit);
-  return (float) (-1 * byteFromEeprom);
+  currentSavedDbLevel = (float) (-1 * byteFromEeprom);
+  return currentSavedDbLevel;
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Function to set NeoPixel colour to match current DAC level
+int setNeoPixelColourFromDac (float DACLevel) {
+  byte redPixelColor = (log(DACLevel) / log(2)) * 16;
+  byte bluePixelColor = 255 - redPixelColor;
+  setNeoPixelColour(redPixelColor, 0, bluePixelColor);
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Function to multiple NeoPixels to a colour simultaneously
+int setNeoPixelColour (byte Red, byte Green, byte Blue) {
+  strip.setPixelColor(0, Red, Green, Blue);
+  strip.setPixelColor(1, Red, Green, Blue);
+  strip.setPixelColor(2, Red, Green, Blue);
+  strip.setPixelColor(3, Red, Green, Blue);
+  strip.setPixelColor(4, Red, Green, Blue);
+  strip.setPixelColor(5, Red, Green, Blue);
+  strip.show();
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Function to send data to the MCP23S08
@@ -164,6 +197,13 @@ int changeInput(String direction) {
   }
   setMCP23S08(9, B00000001);
   muteEnabled = false;
+  setNeoPixelColour(255, 0, 0);
+  delay(20);
+  setNeoPixelColour(0, 255, 0);
+  delay(20);
+  setNeoPixelColour(0, 0, 255);
+  delay(20);
+  setNeoPixelColourFromDac(currentDacR2Rvalue);
   if (debugEnabled) {
     Serial.print ("Selected Input: ");
     Serial.println (selectedInput);
@@ -175,6 +215,7 @@ int changeMute() {
   if (muteEnabled) {
     setMCP23S08(9, B00000001);
     muteEnabled = false;
+    setNeoPixelColourFromDac(currentDacR2Rvalue);
     if (debugEnabled) {
       Serial.println ("Mute disabled");
     }
@@ -189,14 +230,14 @@ int changeMute() {
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Functions to change volume
 int changeVolume(float increment) {
+  currentChangeVolumeIncrement = 0;
   float newDbLevel = currentDbLevel + increment;
-  currentChangeVolumeIncrement = increment;
-  volumeFadeInProgress = false;
   if (newDbLevel < max_dbLevel && newDbLevel > min_dbLevel) {
+    currentChangeVolumeIncrement = increment;
     SetDac88812Volume(newDbLevel);
-  } else if (newDbLevel >= max_dbLevel && currentDbLevel != max_dbLevel) {
+  } else if (newDbLevel >= max_dbLevel && (max_dbLevel - currentDbLevel) > 0.01) {
     SetDac88812Volume(max_dbLevel);
-  } else if (newDbLevel <= min_dbLevel && currentDbLevel != min_dbLevel) {
+  } else if (newDbLevel <= min_dbLevel && (currentDbLevel - min_dbLevel) > 0.01) {
     SetDac88812Volume(min_dbLevel);
   } else {
     if (debugEnabled) {
@@ -206,16 +247,21 @@ int changeVolume(float increment) {
 }
 int SetDac88812Volume(float newDbLevel) {
   unsigned int newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
-  unsigned int currentDacR2Rvalue = 65536*(pow(10, (currentDbLevel/20)));
+  currentDacR2Rvalue = 65536*(pow(10, (currentDbLevel/20)));
   if (currentDacR2Rvalue == newDacR2Rvalue && currentChangeVolumeIncrement) {
     // This skips volume level steps that are too small or identical.
     while (currentDacR2Rvalue == newDacR2Rvalue && newDbLevel > (min_dbLevel - currentChangeVolumeIncrement)) {
       newDbLevel = newDbLevel + currentChangeVolumeIncrement;
       newDacR2Rvalue = 65536*(pow(10, (newDbLevel/20)));
+      if (debugEnabled) {
+        Serial.println ("Auto skipping steps");
+      }
     }
   }
   if (newDacR2Rvalue <= 65536 && newDacR2Rvalue >= 0) {
+    setNeoPixelColourFromDac(newDacR2Rvalue);
     currentDbLevel = newDbLevel;
+    currentDacR2Rvalue = newDacR2Rvalue;
     isVolumeSavedToEeprom = false;
     timeOfLastVolumeChange = millis();
     byte highByte = newDacR2Rvalue >> 8;
@@ -229,7 +275,7 @@ int SetDac88812Volume(float newDbLevel) {
     // Print levels
     if (debugEnabled) {
       Serial.print ("dB: ");
-      Serial.print (newDbLevel);
+      Serial.print (newDbLevel, 7);
       Serial.print (" / DAC Attenuation Level: ");
       Serial.println (newDacR2Rvalue);
     }
@@ -246,22 +292,27 @@ int SetDac88812Volume(float newDbLevel) {
 void loop() {
   // Decode the IR if recieved
   if (irrecv.decode(&results)) {
+    volumeFadeInProgress = false;
     if (results.value == 2011291790) {
       lastIRoperation = "changeInputUp";
+      if (muteEnabled) { changeMute(); }
       changeInput("up");
       delay(100);
     }
     if (results.value == 2011238542) {
       lastIRoperation = "changeInputDown";
+      if (muteEnabled) { changeMute(); }
       changeInput("down");
       delay(100);
     }
     if (results.value == 2011287694) {
       lastIRoperation = "volumeUp";
+      if (muteEnabled) { changeMute(); }
       changeVolume(iRIncrement);
     }
     if (results.value == 2011279502) {
       lastIRoperation = "volumeDown";
+      if (muteEnabled) { changeMute(); }
       changeVolume(-iRIncrement);
     }
     if (results.value == 2011265678) {
@@ -269,7 +320,7 @@ void loop() {
       changeMute();
     }
     if (results.value == 2011250830) {
-      lastIRoperation = "menu";
+      //lastIRoperation = "menu";
     }
     if (results.value == 4294967295) {
       if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); }
@@ -282,17 +333,23 @@ void loop() {
   // Read encoder
   n = digitalRead(encoder0PinA);
   if ((encoder0PinALast == LOW) && (n == HIGH)) {
-      if (digitalRead(encoder0PinB) == LOW) {
-        changeVolume(encoderIncrement);
-      } else {
-        changeVolume(-encoderIncrement);
-      }
+    if (muteEnabled) { changeMute(); }
+    volumeFadeInProgress = false;
+    if (digitalRead(encoder0PinB) == LOW) {
+      changeVolume(encoderIncrement);
+    } else {
+      changeVolume(-encoderIncrement);
+    }
   }
   encoder0PinALast = n;
   // Save volume level
-  unsigned long CurrentTime = millis();
-  if (!isVolumeSavedToEeprom && (CurrentTime - timeOfLastVolumeChange) > timeBetweenVolumeSaves) {
-    save_DbLevel(currentDbLevel);
+  unsigned long currentTime = millis();
+  if (!isVolumeSavedToEeprom && (currentTime - timeOfLastVolumeChange) > timeBetweenVolumeSaves) {
+    if (currentDbLevel >= maximumLevelToSave && currentSavedDbLevel != maximumLevelToSave) {
+      save_DbLevel(maximumLevelToSave);
+    } else if (currentDbLevel < maximumLevelToSave && currentDbLevel != currentSavedDbLevel) {
+      save_DbLevel(currentDbLevel);
+    }
   }
   // Fade to a set volume level
   if (volumeFadeInProgress) {
@@ -305,6 +362,20 @@ void loop() {
       if (debugEnabled) {
         Serial.println ("Volume fade complete");
       }
+    }
+  }
+  // Flash NeoPixel Red/Blue if mute is enabled
+  if (muteEnabled) {
+    if (!neopixelIsRed && (currentTime - timeOfLastNeopixelColourChange) > 300) {
+      setNeoPixelColour(0, 0, 0);
+      neopixelIsRed = true;
+      neopixelIsBlue = false;
+      timeOfLastNeopixelColourChange = millis();
+    } else if (!neopixelIsBlue && (currentTime - timeOfLastNeopixelColourChange) > 300) {
+      setNeoPixelColour(0, 255, 0);
+      neopixelIsBlue = true;
+      neopixelIsRed = false;
+      timeOfLastNeopixelColourChange = millis();
     }
   }
 }
