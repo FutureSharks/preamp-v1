@@ -1,24 +1,37 @@
 // Tidy IR repeat code
-// Time based acceleration of volume changes via IR
-// Test time based acceleration of volume changes via encoder
+// Time based acceleration of volume changes via IR/encoder?
 // Remember volume level after power off
 // Volume is changed on bootup due to encoder code
 // Verify dB curve, try proper dB curve
 // Skip repeated dacAttenuationLevel steps
-// Remove IR power
-// Need to remove serial for speed?
+//
+//
 //////////////////////////////////////////////////////////////////////////////////////////////
 #include "SPI.h"
 // Arduino pin 9 & 10 = inputSelectorCSPin & MDACCSPin
 // Arduino pin 11 = SDI
 // Arduino pin 13 = CLK
 
+// If enabled volume/input data will be printed via serial
+String debugEnabled = "True";
+
+// Neopixel Stuff
+#include "Adafruit_NeoPixel.h"
+#define neopixelPin 8
+// Parameter 1 = number of pixels in strip
+// Parameter 2 = pin number (most are valid)
+// Parameter 3 = pixel type flags, add together as needed:
+//   NEO_KHZ800  800 KHz bitstream (most NeoPixel products w/WS2812 LEDs)
+//   NEO_KHZ400  400 KHz (classic 'v1' (not v2) FLORA pixels, WS2811 drivers)
+//   NEO_GRB     Pixels are wired for GRB bitstream (most NeoPixel products)
+//   NEO_RGB     Pixels are wired for RGB bitstream (v1 FLORA pixels, not v2)
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(8, neopixelPin, NEO_GRB + NEO_KHZ800);
+
 // IR stuff
 #include "IRremote.h"
-int RECV_PIN = 5;  // IR Receiver pin
-// Temporary power
-const int IRPowerPin = A0;
-const int IRGroundPin = A1;
+int RECV_PIN = A2;  // IR Receiver pin
+const int IRGroundPin = A0;
+const int IRPowerPin = A1;
 IRrecv irrecv(RECV_PIN);
 decode_results results;
 String lastIRoperation;
@@ -36,6 +49,8 @@ double encoderIncrement = 1;
 double iRIncrement = 3;
 
 // Encoder stuff
+const int encoder0GroundPin = 4;
+const int encoder0PowerPin = 5;
 int encoder0PinA = 6;
 int encoder0PinB = 7;
 int encoder0Pos = 0;
@@ -47,18 +62,22 @@ int n = LOW;
 //////////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
   // Serial
-  Serial.begin (9600);
-  // Set up pins for encoder:
-  pinMode (encoder0PinA,INPUT);
-  pinMode (encoder0PinB,INPUT);
-  // SPI Stuff
+  if (debugEnabled == "True") {
+    Serial.begin (9600);
+  }
+  // Neopixel
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
+  // SPI
   // set the CS pins as output:
   pinMode (inputSelectorCSPin, OUTPUT);
   digitalWrite(inputSelectorCSPin,HIGH);
   pinMode (MDACCSPin, OUTPUT);
   digitalWrite(MDACCSPin,HIGH);
   // Start SPI
-  Serial.println ("Starting SPI..");
+  if (debugEnabled == "True") {
+    Serial.println ("Starting SPI..");
+  }
   SPI.begin();
   // Set SPI selector IO direction to output for all pinds
   Serial.println ("Setting SPI selector IO direction control registers..");
@@ -67,6 +86,13 @@ void setup() {
   SPI.transfer(0); // Select IODIR register
   SPI.transfer(0); // Set register
   digitalWrite(inputSelectorCSPin,HIGH);
+  // Set up pins for encoder:
+  pinMode (encoder0PinA,INPUT);
+  pinMode (encoder0PinB,INPUT);
+  pinMode (encoder0GroundPin,OUTPUT);
+  pinMode (encoder0PowerPin,OUTPUT);
+  digitalWrite(encoder0GroundPin,LOW);
+  digitalWrite(encoder0PowerPin,HIGH);
   // IR
   irrecv.enableIRIn(); // Start the receiver
   pinMode(IRPowerPin, OUTPUT);
@@ -74,7 +100,9 @@ void setup() {
   digitalWrite(IRPowerPin, HIGH); // Power for the IR
   digitalWrite(IRGroundPin, LOW); // GND for the IR
   // Set MADC volume to 0
-  Serial.println ("Setting volume to initial value..");
+  if (debugEnabled == "True") {
+    Serial.println ("Setting volume to initial value..");
+  }
   SetDac88812Volume(currentDbLevel);
   // Sleep for start-up mute
   delay(1000);
@@ -114,8 +142,10 @@ int changeInput(String direction) {
       setMCP23S08(9, B00000001);
       break;
   }
-  Serial.print ("Selected Input: ");
-  Serial.println (selectedInput);
+  if (debugEnabled == "True") {
+    Serial.print ("Selected Input: ");
+    Serial.println (selectedInput);
+  }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Functions to change volume
@@ -142,15 +172,35 @@ int SetDac88812Volume(double currentDbLevel) {
     SPI.transfer(3); // This is the address code for setting both DACs, ie left and right
     SPI.transfer(highByte);
     SPI.transfer(lowByte);
-    digitalWrite(MDACCSPin, HIGH);
+    digitalWrite(MDACCSPin, HIGH);\
     // Print levels
-    Serial.print ("dB: ");
-    Serial.print (currentDbLevel);
-    Serial.print (" / DAC Attenuation Level: ");
-    Serial.println (dacAttenuationLevel);
+    if (debugEnabled == "True") {
+      Serial.print ("dB: ");
+      Serial.print (currentDbLevel);
+      Serial.print (" / DAC Attenuation Level: ");
+      Serial.println (dacAttenuationLevel);
+      int BlueNeopixelBrightness = (currentDbLevel * -2.6);
+      int RedNeopixelBrightness = (255 - (currentDbLevel * -2.6));
+      SetPixelColour(RedNeopixelBrightness, 0, BlueNeopixelBrightness);
+    }
   } else {
-    Serial.println ("SetDac88812Volume ERROR");
+    if (debugEnabled == "True") {
+      Serial.println ("SetDac88812Volume ERROR");
+    }
   }
+}
+//////////////////////////////////////////////////////////////////////////////////////////////
+// Functions to change Neopixel colour
+int SetPixelColour(int red, int green, int blue) {
+  strip.setPixelColor(0, red, green, blue);
+  strip.setPixelColor(1, red, green, blue);
+  strip.setPixelColor(2, red, green, blue);
+  strip.setPixelColor(3, red, green, blue);
+  strip.setPixelColor(4, red, green, blue);
+  strip.setPixelColor(5, red, green, blue);
+  strip.setPixelColor(6, red, green, blue);
+  strip.setPixelColor(7, red, green, blue);
+  strip.show();
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
