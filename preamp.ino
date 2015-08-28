@@ -1,6 +1,15 @@
+// Tidy IR repeat code
+// Time based acceleration of volume changes via IR
+// Test time based acceleration of volume changes via encoder
+// Remember volume level after power off
+// Volume is changed on bootup due to encoder code
+// Verify dB curve, try proper dB curve
+// Skip repeated dacAttenuationLevel steps
+// Remove IR power
+// Need to remove serial for speed?
 //////////////////////////////////////////////////////////////////////////////////////////////
 #include "SPI.h"
-// Arduino pin 9 & 10 = CS
+// Arduino pin 9 & 10 = inputSelectorCSPin & MDACCSPin
 // Arduino pin 11 = SDI
 // Arduino pin 13 = CLK
 
@@ -20,11 +29,11 @@ const int inputSelectorCSPin = 9;
 
 // MDAC attenuator stuff
 const int MDACCSPin = 10;
-double dbLevel = -30;
-double dbIncrement = 0.5;
-unsigned int dac_level;
-// Address code 3 = Both A and B DACs
-int addr_decode = 3;
+double currentDbLevel = -30;
+double max_dbLevel = -0.01;
+double min_dbLevel = -97;
+double encoderIncrement = 1;
+double iRIncrement = 3;
 
 // Encoder stuff
 int encoder0PinA = 6;
@@ -37,29 +46,27 @@ int n = LOW;
 // Setup
 //////////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
-  // set the CS pins as output:
-  pinMode (inputSelectorCSPin, OUTPUT);
-  digitalWrite(inputSelectorCSPin,HIGH);
-  pinMode (MDACCSPin, OUTPUT);
-  digitalWrite(MDACCSPin,HIGH);
   // Serial
   Serial.begin (9600);
   // Set up pins for encoder:
   pinMode (encoder0PinA,INPUT);
   pinMode (encoder0PinB,INPUT);
-  // Start serial
+  // SPI Stuff
+  // set the CS pins as output:
+  pinMode (inputSelectorCSPin, OUTPUT);
+  digitalWrite(inputSelectorCSPin,HIGH);
+  pinMode (MDACCSPin, OUTPUT);
+  digitalWrite(MDACCSPin,HIGH);
+  // Start SPI
   Serial.println ("Starting SPI..");
   SPI.begin();
-  Serial.println ("Setting control registers..");
   // Set SPI selector IO direction to output for all pinds
+  Serial.println ("Setting SPI selector IO direction control registers..");
   digitalWrite(inputSelectorCSPin,LOW);
   SPI.transfer(B01000000); // Send Device Opcode
   SPI.transfer(0); // Select IODIR register
   SPI.transfer(0); // Set register
   digitalWrite(inputSelectorCSPin,HIGH);
-  // Sleep for start-up mute
-  delay(1000);
-  setMCP23S08(9, B00000001);  
   // IR
   irrecv.enableIRIn(); // Start the receiver
   pinMode(IRPowerPin, OUTPUT);
@@ -67,17 +74,20 @@ void setup() {
   digitalWrite(IRPowerPin, HIGH); // Power for the IR
   digitalWrite(IRGroundPin, LOW); // GND for the IR
   // Set MADC volume to 0
-  Serial.println ("Setting volume to 0..");
-  DACWrite(addr_decode, 0);
+  Serial.println ("Setting volume to initial value..");
+  SetDac88812Volume(currentDbLevel);
+  // Sleep for start-up mute
+  delay(1000);
+  setMCP23S08(9, B00000001);
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Function to send data to the MCP23S08
 // select_register: 9 = GPIO
 int setMCP23S08 (int select_register, int register_value) {
   digitalWrite(inputSelectorCSPin,LOW);
-  SPI.transfer(B01000000); // Send Device Opcode
+  SPI.transfer(B01000000);       // Send Device Opcode
   SPI.transfer(select_register); // Select register
-  SPI.transfer(register_value); // Set register
+  SPI.transfer(register_value);  // Set register
   digitalWrite(inputSelectorCSPin,HIGH);
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -109,37 +119,40 @@ int changeInput(String direction) {
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Functions to change volume
-int WriteAndPrintLevel(){
-  Serial.print ("dB: ");
-  Serial.print (dbLevel);
-  Serial.print (" / DAC Level: ");
-  Serial.println (dac_level);
-  DACWrite(addr_decode, dac_level);
+int ChangeVolume(double increment) {
+  double newDbLevel = currentDbLevel + increment;
+  if (newDbLevel < max_dbLevel && newDbLevel > min_dbLevel) {
+    currentDbLevel = newDbLevel;
+    SetDac88812Volume(currentDbLevel);
+  } else if (newDbLevel >= max_dbLevel && currentDbLevel != max_dbLevel) {
+    SetDac88812Volume(max_dbLevel);
+    currentDbLevel = max_dbLevel;
+  } else if (newDbLevel <= min_dbLevel && currentDbLevel != min_dbLevel) {
+    SetDac88812Volume(min_dbLevel);
+    currentDbLevel = min_dbLevel;
+  } 
 }
-int VolumeUp() {
-  if (dbLevel < (0-dbIncrement)) {
-    dbLevel = dbLevel + dbIncrement;
-    dac_level = 65536*(pow(10, (dbLevel/20)));
-    WriteAndPrintLevel();
+int SetDac88812Volume(double currentDbLevel) {
+  unsigned int dacAttenuationLevel = 65536*(pow(10, (currentDbLevel/20)));
+  if (dacAttenuationLevel <= 65536 || dacAttenuationLevel >= 0) {
+    byte highByte = dacAttenuationLevel >> 8;
+    unsigned int lowBytetemp = dacAttenuationLevel << 8;
+    byte lowByte = lowBytetemp >> 8;
+    digitalWrite(MDACCSPin, LOW);
+    SPI.transfer(3); // This is the address code for setting both DACs, ie left and right
+    SPI.transfer(highByte);
+    SPI.transfer(lowByte);
+    digitalWrite(MDACCSPin, HIGH);
+    // Print levels
+    Serial.print ("dB: ");
+    Serial.print (currentDbLevel);
+    Serial.print (" / DAC Attenuation Level: ");
+    Serial.println (dacAttenuationLevel);
+  } else {
+    Serial.println ("SetDac88812Volume ERROR");
   }
 }
-int VolumeDown() {
-  if (dbLevel > -102.5) {
-    dbLevel = dbLevel - dbIncrement;
-    dac_level = 65536*(pow(10, (dbLevel/20)));
-    WriteAndPrintLevel();
-  }
-}
-void DACWrite(int addr_decode, unsigned int level) {
-  digitalWrite(MDACCSPin, LOW);
-  SPI.transfer(addr_decode);
-  byte highByte = level >> 8;  
-  unsigned int lowBytetemp = level << 8;
-  byte lowByte = lowBytetemp >> 8;
-  SPI.transfer(highByte);
-  SPI.transfer(lowByte);
-  digitalWrite(MDACCSPin, HIGH);
-}
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Main loop
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -158,17 +171,17 @@ void loop() {
     }
     if(results.value == 2011287694) {
       lastIRoperation = "volumeUp";
-      VolumeUp();
+      ChangeVolume(iRIncrement);
     }
     if(results.value == 2011279502) {
       lastIRoperation = "volumeDown";
-      VolumeDown();
+      ChangeVolume(-iRIncrement);
     }
     if(results.value == 4294967295) {
       if (lastIRoperation == "changeInputUp") { delay(500); changeInput("up"); }
       if (lastIRoperation == "changeInputDown") { delay(500); changeInput("down"); }
-      if (lastIRoperation == "volumeUp") { VolumeUp(); }
-      if (lastIRoperation == "volumeDown") { VolumeDown(); }
+      if (lastIRoperation == "volumeUp") { ChangeVolume(iRIncrement); }
+      if (lastIRoperation == "volumeDown") { ChangeVolume(-iRIncrement); }
     }
     irrecv.resume(); // Receive the next value
   }
@@ -176,9 +189,9 @@ void loop() {
   n = digitalRead(encoder0PinA);
   if ((encoder0PinALast == LOW) && (n == HIGH)) {
     if (digitalRead(encoder0PinB) == LOW) {
-      VolumeUp();
+      ChangeVolume(encoderIncrement);
     } else {
-      VolumeDown();
+      ChangeVolume(-encoderIncrement);
     }
   }
   encoder0PinALast = n;
