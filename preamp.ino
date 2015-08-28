@@ -6,7 +6,10 @@
 
 // IR stuff
 #include "IRremote.h"
-int RECV_PIN = A0;  // IR Receiver pin
+int RECV_PIN = 5;  // IR Receiver pin
+// Temporary power
+const int IRPowerPin = A0;
+const int IRGroundPin = A1;
 IRrecv irrecv(RECV_PIN);
 decode_results results;
 String lastIRoperation;
@@ -24,8 +27,6 @@ unsigned int dac_level;
 int addr_decode = 3;
 
 // Encoder stuff
-const int encoderPowerPin = 4;
-const int encoderGroundPin = 5;
 int encoder0PinA = 6;
 int encoder0PinB = 7;
 int encoder0Pos = 0;
@@ -46,10 +47,6 @@ void setup() {
   // Set up pins for encoder:
   pinMode (encoder0PinA,INPUT);
   pinMode (encoder0PinB,INPUT);
-  pinMode (encoderPowerPin, OUTPUT);
-  pinMode (encoderGroundPin, OUTPUT);
-  digitalWrite(encoderPowerPin,HIGH);
-  digitalWrite(encoderGroundPin,LOW);
   // Start serial
   Serial.println ("Starting SPI..");
   SPI.begin();
@@ -65,10 +62,10 @@ void setup() {
   setMCP23S08(9, B00000001);  
   // IR
   irrecv.enableIRIn(); // Start the receiver
-  pinMode(A1, OUTPUT);
-  pinMode(A2, OUTPUT);
-  digitalWrite(A1, LOW); // GND for the IR
-  digitalWrite(A2, HIGH); // Power for the IR
+  pinMode(IRPowerPin, OUTPUT);
+  pinMode(IRGroundPin, OUTPUT);
+  digitalWrite(IRPowerPin, HIGH); // Power for the IR
+  digitalWrite(IRGroundPin, LOW); // GND for the IR
   // Set MADC volume to 0
   Serial.println ("Setting volume to 0..");
   DACWrite(addr_decode, 0);
