@@ -29,8 +29,8 @@ https://github.com/adafruit/Adafruit_NeoPixel
 
 ![GIF of preamp](http://giant.gfycat.com/SneakyBreakableHyrax.gif)
 
-![Completed preamp 1](../blob/master/images/P8040008.JPG?raw=true)
+![Completed preamp 1](../master/images/P8040008.JPG?raw=true)
 
-![Completed preamp 2](../blob/master/images/P8040016.JPG?raw=true)
+![Completed preamp 2](../master/images/P8040016.JPG?raw=true)
 
-![Completed preamp 3](../blob/master/images/P8040071.JPG?raw=true)
+![Completed preamp 3](../master/images/P8040071.JPG?raw=true)
